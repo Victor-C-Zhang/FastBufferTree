@@ -33,10 +33,12 @@ private:
   File_Pointer file_offset;
 
   /*
-   * Check if this buffer needs a flush
+   * Check if this buffer needs a flush. 
+   * In the case of leaf nodes this returns true if the leaf has a new sketch sized buffer ready
+   * @param size  the size of the current write
    * @return true if buffer needs a flush
    */
-  bool needs_flush();
+  bool needs_flush(uint32_t size);
 
 public:
   // this node's level in the tree. 0 is root, 1 is it's children, etc
@@ -74,7 +76,7 @@ public:
 
   inline bool is_leaf()  {return min_key == max_key;}
 
-  inline void reset() {storage_ptr = 0;}
+  inline void reset(File_Pointer npos=0) {storage_ptr = npos;}
   inline buffer_id_t get_id() {return id;}
   inline File_Pointer size() {return storage_ptr;}
   inline File_Pointer offset() {return file_offset;}

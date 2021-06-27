@@ -52,14 +52,15 @@ private:
   // we could just read back from disk instead (more IOs though)
   char ***flush_buffers;
   char ***flush_positions; // pointers into the flush_buffers
-  char **read_buffers;
 
   /*
    * root node and functions for handling it
    */
   char *root_node;
   flush_ret_t flush_root();
-  flush_ret_t flush_control_block(BufferControlBlock *bcb);
+  flush_ret_t flush_control_block(BufferControlBlock *bcb, bool force=false);
+  flush_ret_t flush_internal_node(BufferControlBlock *bcb);
+  flush_ret_t flush_leaf_node(BufferControlBlock *bcb, bool force);
   uint root_position;
   std::mutex root_lock;
 
@@ -92,9 +93,9 @@ public:
    * @param b       branching factor.
    * @param nodes   number of nodes in the graph
    * @param workers the number of workers which will be using this buffer tree (defaults to 1)
-   * @param reset   should truncate the file storage upon opening
+   * @param queue_factor  the factor we multiply by workers to get number of queue slots
    */
-  BufferTree(std::string dir, uint32_t size, uint32_t b, Node nodes, int workers, bool reset);
+  BufferTree(std::string dir, uint32_t size, uint32_t b, Node nodes, int workers, int queue_factor);
   ~BufferTree();
   /**
    * Puts an update into the data structure.
@@ -176,8 +177,10 @@ public:
   static uint64_t leaf_size;
   /*
    * File descriptor of backing file for storage
+   * and a mapping to it using mmap
    */
-  static int backing_store;
+  int backing_store;
+  static char *mapped_store;
 };
 
 class BufferFullError : public std::exception {
