@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <utility>
+#include <atomic>
 
 struct queue_elm {
 	volatile bool dirty;    // is this queue element yet to be processed by sketching (if so do not overwrite)
@@ -60,9 +61,16 @@ public:
 	 * Used for debugging
 	 */
 	void print();
+
+	void get_stats() {printf("%lu inserts to empty out of %lu total inserts. High water mark = %u\n", empty_inserts, inserts, max_queue_size);}
+
+	// functions for checking if the queue is empty or full
+	inline bool full()     {return queue_array[head].dirty;} // if the next data item is dirty then full
+	// if place to read from is clean and has not been peeked already then queue is empty
+	inline bool empty()    {return !queue_array[tail].dirty || queue_array[tail].touched;}
 private:
-	int len;      // maximum number of data elements to be stored in the queue
-	int elm_size; // size of an individual element in bytes
+	int64_t len;      // maximum number of data elements to be stored in the queue
+	int64_t elm_size; // size of an individual element in bytes
 
 	int head;     // where to push (starts at 0, write pointer)
 	int tail;     // where to peek (starts at 0, read pointer)
@@ -73,10 +81,10 @@ private:
 	// increment the head or tail pointer
 	inline int incr(int p) {return (p + 1) % len;}
 
-	// functions for checking if the queue is empty or full
-	inline bool full()     {return queue_array[head].dirty;} // if the next data item is dirty then full
-	// if place to read from is clean and has not been peeked already then queue is empty
-	inline bool empty()    {return !queue_array[tail].dirty || queue_array[tail].touched;}
+	uint64_t inserts        = 0;
+	uint64_t empty_inserts  = 0;
+	std::atomic<uint32_t> queue_size;
+	uint32_t max_queue_size = 0;
 };
 
 class WriteTooBig : public std::exception {

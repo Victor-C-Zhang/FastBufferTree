@@ -10,6 +10,7 @@ CircularQueue::CircularQueue(int num_elements, int size_of_elm):
 	head = 0;
 	tail = 0;
 	no_block = false;
+	queue_size = 0;
 
 	// malloc the memory for the circular queue
 	queue_array = (queue_elm *) malloc(sizeof(queue_elm) * len);
@@ -21,7 +22,7 @@ CircularQueue::CircularQueue(int num_elements, int size_of_elm):
 		queue_array[i].size    = 0;
 	}
 
-	printf("CQ: created circular queue with %i elements each of size %i\n", len, elm_size);
+	printf("CQ: created circular queue with %li elements each of size %li\n", len, elm_size);
 }
 
 CircularQueue::~CircularQueue() {
@@ -32,15 +33,22 @@ CircularQueue::~CircularQueue() {
 
 void CircularQueue::push(char *elm, int size) {
 	if(size > elm_size) {
-		printf("write of size %i bytes greater than max of %i\n", size, elm_size);
+		printf("write of size %i bytes greater than max of %li\n", size, elm_size);
 		throw WriteTooBig();
 	}
+
+	inserts++;
+	if (empty())
+		empty_inserts++;
 
 	while(true) {
 		std::unique_lock<std::mutex> lk(write_lock);
 		// printf("CQ: push: wait on not-full. full() = %s\n", (full())? "true" : "false");
 		cirq_full.wait_for(lk, std::chrono::seconds(2), [this]{return !full();});
 		if(!full()) {
+			queue_size++;
+			if (queue_size > max_queue_size)
+				max_queue_size = queue_size;
 			memcpy(queue_array[head].data, elm, size);
 			queue_array[head].dirty = true;
 			queue_array[head].size = size;
@@ -61,6 +69,7 @@ bool CircularQueue::peek(std::pair<int, queue_elm> &ret) {
 			int temp = tail;
 			queue_array[tail].touched = true;
 			tail = incr(tail);
+			queue_size--;
 			lk.unlock();
 
 			ret.first = temp;

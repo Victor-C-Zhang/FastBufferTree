@@ -15,7 +15,7 @@ uint32_t BufferTree::buffer_size;
 uint64_t BufferTree::backing_EOF;
 uint64_t BufferTree::leaf_size;
 int      BufferTree::backing_store;
-
+char *   BufferTree::cache;
 
 /*
  * Constructor
@@ -24,8 +24,9 @@ int      BufferTree::backing_store;
  * We assume that node indices begin at 0 and increase to N-1
  */
 BufferTree::BufferTree(std::string dir, uint32_t size, uint32_t b, Node
-nodes, int workers, bool reset=false) : dir(dir), M(size), B(b), N(nodes) {
-	page_size = sysconf(_SC_PAGE_SIZE); // works on POSIX systems (alternative is boost)
+nodes, int workers, int queue_factor, bool reset=false) : dir(dir), M(size), B(b), N(nodes) {
+	page_size = 5 * sysconf(_SC_PAGE_SIZE); // works on POSIX systems (alternative is boost)
+	page_size = (page_size % serial_update_size == 0)? page_size : page_size + serial_update_size - page_size % serial_update_size;
 	int file_flags = O_RDWR | O_CREAT; // direct memory O_DIRECT may or may not be good
 	if (reset) {
 		file_flags |= O_TRUNC;
@@ -41,7 +42,7 @@ nodes, int workers, bool reset=false) : dir(dir), M(size), B(b), N(nodes) {
 	buffer_size     = M; // probably figure out a better solution than this
 	backing_EOF     = 0;
 	leaf_size       = floor(24 * pow(log2(N), 3)); // size of leaf proportional to size of sketch
-	leaf_size       = (leaf_size < page_size)? page_size : leaf_size; //enforce size of at least page_size
+	leaf_size       = (leaf_size % serial_update_size == 0)? leaf_size : leaf_size + serial_update_size - leaf_size % serial_update_size;
 
 	// malloc the memory for the root node
 	root_node = (char *) malloc(buffer_size);
@@ -54,11 +55,12 @@ nodes, int workers, bool reset=false) : dir(dir), M(size), B(b), N(nodes) {
 	for (int l = 0; l < max_level; l++) {
 		flush_buffers[l]   = (char **) malloc(sizeof(char *) * B);
 		flush_positions[l] = (char **) malloc(sizeof(char *) * B);
-		read_buffers[l]    = (char *)  malloc(sizeof(char) * (buffer_size + page_size));
+		if(l != 0) read_buffers[l] = (char *) malloc(sizeof(char) * (buffer_size + page_size));
 		for (uint i = 0; i < B; i++) {
 			flush_buffers[l][i] = (char *) calloc(page_size, sizeof(char));
 		}
 	}
+	cache = (char *) malloc(B * ((uint64_t)buffer_size + page_size));
 
 	// open the file which will be our backing store for the non-root nodes
 	// create it if it does not already exist
@@ -73,8 +75,7 @@ nodes, int workers, bool reset=false) : dir(dir), M(size), B(b), N(nodes) {
 	setup_tree(); // setup the buffer tree
 
 	// create the circular queue in which we will place ripe fruit (full leaves)
-	// make space for full 2 * workers full updates
-	cq = new CircularQueue(2*workers, leaf_size + page_size);
+	cq = new CircularQueue(queue_factor*workers, leaf_size + page_size);
 	
 	// will want to use mmap instead? - how much is in RAM after allocation (none?)
 	// can't use mmap instead might use it as well. (Still need to create the file to be a given size)
@@ -86,12 +87,13 @@ nodes, int workers, bool reset=false) : dir(dir), M(size), B(b), N(nodes) {
 
 BufferTree::~BufferTree() {
 	printf("Closing BufferTree\n");
+	cq->get_stats();
 	// force_flush(); // flush everything to leaves (could just flush to files in higher levels)
 
 	// free malloc'd memory
 	for(int l = 0; l < max_level; l++) {
 		free(flush_positions[l]);
-		free(read_buffers[l]);
+		if (l != 0) free(read_buffers[l]);
 		for (uint16_t i = 0; i < B; i++) {
 			free(flush_buffers[l][i]);
 		}
@@ -100,7 +102,7 @@ BufferTree::~BufferTree() {
 	free(flush_buffers);
 	free(flush_positions);
 	free(read_buffers);
-
+	free(cache);
 	free(root_node);
 	for(uint i = 0; i < buffers.size(); i++) {
 		if (buffers[i] != nullptr)
@@ -124,6 +126,8 @@ void BufferTree::setup_tree() {
 
 	// create the BufferControlBlocks
 	for (uint l = 1; l <= max_level; l++) { // loop through all levels
+		if(l == 2) size = 0; // reset the size because the first level is held in cache
+
 		uint level_size    = pow(B, l); // number of blocks in this level
 		uint plevel_size   = pow(B, l-1);
 		uint start         = buffers.size();
@@ -161,7 +165,7 @@ void BufferTree::setup_tree() {
 			buffers.push_back(bcb);
 			index++; // seperate variable because sometimes we skip stuff
 			if(bcb->is_leaf())
-				size += leaf_size + page_size;
+				size += (1 << 20) + page_size; // set to 1 MB
 			else 
 				size += buffer_size + page_size;
 		}
@@ -315,41 +319,81 @@ flush_ret_t inline BufferTree::flush_root() {
 	// root_lock.unlock();
 }
 
-flush_ret_t inline BufferTree::flush_control_block(BufferControlBlock *bcb) {
+flush_ret_t inline BufferTree::flush_control_block(BufferControlBlock *bcb, bool force) {
 	// printf("flushing "); bcb->print();
 	if(bcb->size() == 0) {
 		return; // don't flush empty control blocks
 	}
 
+	if (bcb->is_leaf()) {
+		return flush_leaf_node(bcb, force);
+	}
+	return flush_internal_node(bcb);
+}
+
+flush_ret_t inline BufferTree::flush_internal_node(BufferControlBlock *bcb) {
 	// flushing a control block is the only time read_buffers are used
 	// and we call this on the bottom level of the tree (max_level) so
 	// level-1 for the read_buffers is important.
-
-	uint32_t data_to_read = bcb->size();
 	uint8_t level = bcb->level;
-	uint32_t offset = 0;
-	while(data_to_read > 0) {
-		int len = pread(backing_store, read_buffers[level-1] + offset, data_to_read, bcb->offset() + offset);
-		if (len == -1) {
-			printf("ERROR flush failed to read from buffer %i, %s\n", bcb->get_id(), strerror(errno));
-			exit(EXIT_FAILURE);
+	if (level == 1) { // we have this in cache
+		read_buffers[level-1] = cache + bcb->offset();
+	} else {
+		uint32_t data_to_read = bcb->size();
+		uint32_t offset = 0;
+		while(data_to_read > 0) {
+			int len = pread(backing_store, read_buffers[level-1] + offset, data_to_read, bcb->offset() + offset);
+			if (len == -1) {
+				printf("ERROR flush failed to read from buffer %i, %s\n", bcb->get_id(), strerror(errno));
+				exit(EXIT_FAILURE);
+			}
+			data_to_read -= len;
+			offset += len;
 		}
-		data_to_read -= len;
-		offset += len;
-	}
-
-	if (bcb->is_leaf()) { // this is a leaf node
-		cq->push(read_buffers[level-1], bcb->size()); // add the data we read to the circular queue
-
-		// reset the BufferControlBlock (we have emptied it of data)
-		bcb->reset();
-		return;
 	}
 
 	// printf("read %lu bytes\n", len);
 
 	do_flush(read_buffers[level-1], bcb->size(), bcb->first_child, bcb->min_key, bcb->max_key, bcb->children_num, bcb->level);
 	bcb->reset();
+}
+
+flush_ret_t inline BufferTree::flush_leaf_node(BufferControlBlock *bcb, bool force) {
+	// first we need to establish if doing a write is best
+	if(cq->full() && bcb->size() < buffer_size && !force)
+		return; // don't do anything (use leaf as additional circular queue space)
+
+	uint8_t level = bcb->level;
+	if (level == 1) {
+		read_buffers[level-1] = cache + bcb->offset();
+	} else {
+		uint32_t data_to_read = bcb->size();
+		uint32_t offset = 0;
+		while(data_to_read > 0) {
+			int len = pread(backing_store, read_buffers[level-1] + offset, data_to_read, bcb->offset() + offset);
+			if (len == -1) {
+				printf("ERROR flush failed to read from buffer %i, %s\n", bcb->get_id(), strerror(errno));
+				exit(EXIT_FAILURE);
+			}
+			data_to_read -= len;
+			offset += len;
+		}
+	}
+
+	// printf("Trying to push leaf buffer (%i) of size %lu to cq\n", bcb->get_id(), bcb->size());
+	// empty this leaf into the circular queue
+	// until empty or cq is full
+	// do so back to front
+	while(bcb->size() > 0 && (!cq->full() || force || bcb->size() >= buffer_size)) {
+		File_Pointer begin_offset = (bcb->size() < leaf_size + page_size)? 0 : bcb->size() - leaf_size - page_size;
+
+		// printf("Pushing sketch %lu-%lu to the circular queue\n", begin_offset, bcb->size());
+		cq->push(read_buffers[level-1] + begin_offset, bcb->size() - begin_offset); // add the data we read to the circular queue
+		
+		// reset the BufferControlBlock to the next leaf
+		bcb->reset(begin_offset);
+		// printf("new bcb size = %lu\n", bcb->size());
+	}
 }
 
 // ask the buffer tree for data
@@ -391,7 +435,7 @@ bool BufferTree::get_data(data_ret_t &data) {
 
 		if (upd.first != key) {
 			// error to handle some weird unlikely buffer tree shenanigans
-			printf("source node %lu and key %lu do not match in get_data()\n", upd.first, key);
+			printf("ERROR: source node %lu and key %lu do not match in get_data()\n", upd.first, key);
 			throw KeyIncorrectError();
 		}
 
@@ -412,7 +456,7 @@ flush_ret_t BufferTree::force_flush() {
 	
 	for (BufferControlBlock *bcb : buffers) {
 		if (bcb != nullptr) {
-			flush_control_block(bcb);
+			flush_control_block(bcb, true);
 		}
 	}
 }

@@ -59,7 +59,9 @@ private:
    */
   char *root_node;
   flush_ret_t flush_root();
-  flush_ret_t flush_control_block(BufferControlBlock *bcb);
+  flush_ret_t flush_control_block(BufferControlBlock *bcb, bool force=false);
+  flush_ret_t flush_internal_node(BufferControlBlock *bcb);
+  flush_ret_t flush_leaf_node(BufferControlBlock *bcb, bool force);
   uint root_position;
   std::mutex root_lock;
 
@@ -92,9 +94,10 @@ public:
    * @param b       branching factor.
    * @param nodes   number of nodes in the graph
    * @param workers the number of workers which will be using this buffer tree (defaults to 1)
+   * @param queue_factor  the factor we multiply by workers to get number of queue slots
    * @param reset   should truncate the file storage upon opening
    */
-  BufferTree(std::string dir, uint32_t size, uint32_t b, Node nodes, int workers, bool reset);
+  BufferTree(std::string dir, uint32_t size, uint32_t b, Node nodes, int workers, int queue_factor, bool reset);
   ~BufferTree();
   /**
    * Puts an update into the data structure.
@@ -178,6 +181,8 @@ public:
    * File descriptor of backing file for storage
    */
   static int backing_store;
+  // a chunk of memory we reserve to cache the first level of the buffer tree
+  static char *cache;
 };
 
 class BufferFullError : public std::exception {

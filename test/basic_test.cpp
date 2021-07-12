@@ -42,7 +42,7 @@ void run_test(const int nodes, const int num_updates, const int buffer_size, con
   printf("Running Test: nodes=%i num_updates=%i buffer_size %i branch_factor %i\n",
          nodes, num_updates, buffer_size, branch_factor);
 
-  BufferTree *buf_tree = new BufferTree("./test_", buffer_size, branch_factor, nodes, 1, true);
+  BufferTree *buf_tree = new BufferTree("./test_", buffer_size, branch_factor, nodes, 1, 8, true);
   shutdown = false;
   upd_processed = 0;
   std::thread qworker(querier, buf_tree, nodes);
@@ -80,14 +80,9 @@ TEST(BasicInsert, Medium) {
   run_test(nodes, num_updates, buf, branch);
 }
 
-// test where we fill the lowest buffers as full as we can
-// with insertions.
-TEST(BasicInsert, FillLowest) {
-  uint updates = (8 * MB) / BufferTree::serial_update_size;
-  updates -= updates % 8 + 8;
-
-  const int nodes = 8;
-  const int num_updates = updates;
+TEST(BasicInsert, ManyInserts) {
+  const int nodes = 32;
+  const int num_updates = 1000000;
   const int buf = MB;
   const int branch = 2;
 
@@ -108,7 +103,7 @@ TEST(BasicInsert, EvilInsertions) {
   const int buf = MB;
   const int branch = 2;
 
-  BufferTree *buf_tree = new BufferTree("./test_", buf, branch, nodes, 1, true);
+  BufferTree *buf_tree = new BufferTree("./test_", buf, branch, nodes, 1, 8, true);
   shutdown = false;
   upd_processed = 0;
   std::thread qworker(querier, buf_tree, nodes);
@@ -150,8 +145,8 @@ TEST(Parallelism, ManyQueryThreads) {
   const int branch = 2;
 
   // here we limit the number of slots in the circular queue to 
-  // create contention between the threads. (we pass 5 instead of 20)
-  BufferTree *buf_tree = new BufferTree("./test_", buf, branch, nodes, 5, true);
+  // create contention between the threads. (we pass 5,1 instead of 20,8)
+  BufferTree *buf_tree = new BufferTree("./test_", buf, branch, nodes, 5, 1, true);
   shutdown = false;
   upd_processed = 0;
   std::thread query_threads[20];
