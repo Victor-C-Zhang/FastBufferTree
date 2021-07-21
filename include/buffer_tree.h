@@ -60,7 +60,7 @@ private:
   char *root_node;
   flush_ret_t flush_root();
   flush_ret_t flush_control_block(BufferControlBlock *bcb);
-  uint root_position;
+  uint32_t root_position;
   std::mutex root_lock;
 
   /*
@@ -168,8 +168,8 @@ public:
    * Static variables which track universal information about the buffer tree which
    * we would like to be accesible to all the bufferControlBlocks
    */
-  static uint page_size;
-  static const uint serial_update_size = sizeof(Node) + sizeof(Node);
+  static uint32_t page_size;
+  static const uint32_t serial_update_size = sizeof(Node) + sizeof(Node);
   static uint8_t max_level;
   static uint32_t buffer_size;
   static uint64_t backing_EOF;

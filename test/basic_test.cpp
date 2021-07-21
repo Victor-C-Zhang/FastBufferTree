@@ -83,7 +83,7 @@ TEST(BasicInsert, Medium) {
 // test where we fill the lowest buffers as full as we can
 // with insertions.
 TEST(BasicInsert, FillLowest) {
-  uint updates = (8 * MB) / BufferTree::serial_update_size;
+  uint32_t updates = (8 * MB) / BufferTree::serial_update_size;
   updates -= updates % 8 + 8;
 
   const int nodes = 8;
